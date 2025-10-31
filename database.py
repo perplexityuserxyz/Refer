@@ -68,7 +68,12 @@ class Database:
         
         cursor.execute('''
             INSERT OR IGNORE INTO settings (key, value) 
-            VALUES ('start_message', '🎉 Welcome to Referral Bot!\n\nEarn credits by referring friends:\n• 5 credits per referral\n• Redeem at 300 credits\n\nUse /help to see all commands.')
+            VALUES ('start_message', '🎉 Welcome to Referral Bot!\n\nEarn money by referring friends:\n• ₹5 per referral\n• Redeem at ₹300\n\nUse /help to see all commands.')
+        ''')
+        
+        cursor.execute('''
+            INSERT OR IGNORE INTO settings (key, value) 
+            VALUES ('log_channel', '-1003289550351')
         ''')
         
         conn.commit()
@@ -263,3 +268,19 @@ class Database:
         row = cursor.fetchone()
         conn.close()
         return row[0] if row else 'Welcome!'
+    
+    def set_log_channel(self, channel_id: str):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 
+                      ('log_channel', channel_id))
+        conn.commit()
+        conn.close()
+    
+    def get_log_channel(self) -> Optional[str]:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT value FROM settings WHERE key = ?', ('log_channel',))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
