@@ -1,5 +1,6 @@
 import os
 import logging
+import html
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 from telegram.error import TelegramError
@@ -15,6 +16,15 @@ RUPEES_PER_REFERRAL = 5
 REDEMPTION_THRESHOLD = 300
 
 db = Database()
+
+async def send_log(context: ContextTypes.DEFAULT_TYPE, message: str):
+    """Send log message to the logging channel"""
+    log_channel = db.get_log_channel()
+    if log_channel:
+        try:
+            await context.bot.send_message(chat_id=log_channel, text=message, parse_mode='HTML')
+        except TelegramError as e:
+            logger.error(f"Failed to send log to channel: {e}")
 
 
 async def check_channel_membership(update: Update,
@@ -148,6 +158,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"User: {first_name}\n"
                         f"You earned ₹{RUPEES_PER_REFERRAL}!\n"
                         f"Total Balance: ₹{referrer['credits']}")
+                    
+                    await send_log(
+                        context,
+                        f"📊 <b>New Referral</b>\n\n"
+                        f"👤 Referrer: {html.escape(referrer['first_name'])} (@{html.escape(referrer['username'] or 'N/A')})\n"
+                        f"ID: <code>{referred_by}</code>\n\n"
+                        f"👥 New User: {html.escape(first_name)} (@{html.escape(username or 'N/A')})\n"
+                        f"ID: <code>{user_id}</code>\n\n"
+                        f"💰 Earned: ₹{RUPEES_PER_REFERRAL}\n"
+                        f"💵 Total Balance: ₹{referrer['credits']}\n"
+                        f"📈 Total Referrals: {referrer['total_referrals']}"
+                    )
                 except TelegramError as e:
                     logger.error(f"Could not notify referrer: {e}")
 
@@ -203,16 +225,31 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No users on the leaderboard yet!")
         return
 
-    leaderboard_text = "🏆 Top 10 Referrers 🏆\n\n"
+    stats = db.get_stats()
+    total_earnings = sum([refs * RUPEES_PER_REFERRAL for _, _, _, refs in top_users])
+    
+    leaderboard_text = (
+        f"🏆 <b>Top 10 Referrers Leaderboard</b> 🏆\n\n"
+        f"📊 Total Users: {stats['total_users']}\n"
+        f"💰 Total Distributed: ₹{stats['total_referrals'] * RUPEES_PER_REFERRAL}\n"
+        f"🎁 Total Redemptions: {stats['total_redemptions']}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
 
     medals = ["🥇", "🥈", "🥉"]
     for i, (user_id, username, first_name,
             referrals) in enumerate(top_users, 1):
         medal = medals[i - 1] if i <= 3 else f"{i}."
-        display_name = f"@{username}" if username else first_name
-        leaderboard_text += f"{medal} {display_name} - {referrals} referrals (₹{referrals * RUPEES_PER_REFERRAL})\n"
-
+        display_name = f"@{html.escape(username)}" if username else html.escape(first_name)
+        leaderboard_text += f"{medal} {display_name}\n   └ {referrals} referrals • ₹{referrals * RUPEES_PER_REFERRAL}\n"
+    
     user = db.get_user(update.effective_user.id)
+    if user:
+        user_rank = db.get_user_rank(update.effective_user.id)
+        leaderboard_text += f"\n━━━━━━━━━━━━━━━━━━━━\n"
+        leaderboard_text += f"📍 Your Position: #{user_rank}\n"
+        leaderboard_text += f"💰 Your Earnings: ₹{user['total_referrals'] * RUPEES_PER_REFERRAL}"
+    
     referral_link = f"https://t.me/{context.bot.username}?start={user['referral_code']}" if user else ""
 
     keyboard = [[
@@ -225,7 +262,8 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(leaderboard_text,
-                                    reply_markup=reply_markup)
+                                    reply_markup=reply_markup,
+                                    parse_mode='HTML')
 
 
 async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -271,6 +309,16 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         ], [InlineKeyboardButton("💰 My Profile", callback_data="profile")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await send_log(
+            context,
+            f"💸 <b>Redemption Successful</b>\n\n"
+            f"👤 User: {html.escape(user['first_name'])} (@{html.escape(user['username'] or 'N/A')})\n"
+            f"ID: <code>{user_id}</code>\n\n"
+            f"🎁 Redemption Code: <code>{redemption_code}</code>\n"
+            f"💰 Amount Used: ₹{REDEMPTION_THRESHOLD}\n"
+            f"📊 Total Referrals: {user['total_referrals']}"
+        )
 
         await update.message.reply_text(
             f"🎉 Congratulations! 🎉\n\n"
@@ -305,7 +353,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/addchannel <channel_id> <name> - Add mandatory channel\n"
             "/removechannel <channel_id> - Remove channel\n"
             "/channels - List all channels\n"
-            "/setstart <message> - Set custom start message")
+            "/setstart <message> - Set custom start message\n"
+            "/setlogchannel <channel_id> - Set logging channel\n"
+            "/getlogchannel - View current log channel")
 
     await update.message.reply_text(help_text)
 
@@ -341,6 +391,17 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                f"Success: {success}\n"
                                f"Failed: {failed}\n"
                                f"Total: {len(users)}")
+    
+    await send_log(
+        context,
+        f"📢 <b>Broadcast Sent</b>\n\n"
+        f"👑 Admin: {html.escape(update.effective_user.first_name)}\n"
+        f"ID: <code>{update.effective_user.id}</code>\n\n"
+        f"📝 Message Preview: {html.escape(message[:100])}{'...' if len(message) > 100 else ''}\n\n"
+        f"✅ Success: {success}\n"
+        f"❌ Failed: {failed}\n"
+        f"📊 Total: {len(users)}"
+    )
 
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -376,6 +437,14 @@ async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if db.add_channel(channel_id, channel_name):
         await update.message.reply_text(
             f"✅ Channel added: {channel_name} ({channel_id})")
+        
+        await send_log(
+            context,
+            f"➕ <b>Channel Added</b>\n\n"
+            f"👑 Admin: {html.escape(update.effective_user.first_name)}\n"
+            f"📺 Channel: {html.escape(channel_name)}\n"
+            f"🆔 ID: <code>{html.escape(channel_id)}</code>"
+        )
     else:
         await update.message.reply_text("❌ Channel already exists!")
 
@@ -394,6 +463,13 @@ async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if db.remove_channel(channel_id):
         await update.message.reply_text(f"✅ Channel removed: {channel_id}")
+        
+        await send_log(
+            context,
+            f"➖ <b>Channel Removed</b>\n\n"
+            f"👑 Admin: {html.escape(update.effective_user.first_name)}\n"
+            f"🆔 Channel ID: <code>{html.escape(channel_id)}</code>"
+        )
     else:
         await update.message.reply_text("❌ Channel not found!")
 
@@ -433,7 +509,47 @@ async def set_start_message(update: Update,
 
     await update.message.reply_text(
         f"✅ Start message updated!\n\nNew message:\n{message}")
+    
+    await send_log(
+        context,
+        f"✏️ <b>Start Message Updated</b>\n\n"
+        f"👑 Admin: {html.escape(update.effective_user.first_name)}\n"
+        f"📝 New Message: {html.escape(message[:150])}{'...' if len(message) > 150 else ''}"
+    )
 
+
+async def set_log_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ This command is only for the bot owner!")
+        return
+    
+    if not context.args:
+        await update.message.reply_text("Usage: /setlogchannel <channel_id>")
+        return
+    
+    channel_id = context.args[0]
+    db.set_log_channel(channel_id)
+    
+    await update.message.reply_text(f"✅ Log channel set to: {channel_id}")
+    
+    await send_log(
+        context,
+        f"🔧 <b>Log Channel Updated</b>\n\n"
+        f"👑 Admin: {html.escape(update.effective_user.first_name)}\n"
+        f"📺 New Log Channel: <code>{html.escape(channel_id)}</code>"
+    )
+
+async def get_log_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ This command is only for the bot owner!")
+        return
+    
+    log_channel = db.get_log_channel()
+    
+    if log_channel:
+        await update.message.reply_text(f"📺 Current log channel: {log_channel}")
+    else:
+        await update.message.reply_text("❌ No log channel configured!")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -483,16 +599,31 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.edit_text("No users on the leaderboard yet!")
             return
 
-        leaderboard_text = "🏆 Top 10 Referrers 🏆\n\n"
+        stats = db.get_stats()
+        total_earnings = sum([refs * RUPEES_PER_REFERRAL for _, _, _, refs in top_users])
+        
+        leaderboard_text = (
+            f"🏆 <b>Top 10 Referrers Leaderboard</b> 🏆\n\n"
+            f"📊 Total Users: {stats['total_users']}\n"
+            f"💰 Total Distributed: ₹{stats['total_referrals'] * RUPEES_PER_REFERRAL}\n"
+            f"🎁 Total Redemptions: {stats['total_redemptions']}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        )
 
         medals = ["🥇", "🥈", "🥉"]
         for i, (user_id, username, first_name,
                 referrals) in enumerate(top_users, 1):
             medal = medals[i - 1] if i <= 3 else f"{i}."
-            display_name = f"@{username}" if username else first_name
-            leaderboard_text += f"{medal} {display_name} - {referrals} referrals (₹{referrals * RUPEES_PER_REFERRAL})\n"
-
+            display_name = f"@{html.escape(username)}" if username else html.escape(first_name)
+            leaderboard_text += f"{medal} {display_name}\n   └ {referrals} referrals • ₹{referrals * RUPEES_PER_REFERRAL}\n"
+        
         user = db.get_user(query.from_user.id)
+        if user:
+            user_rank = db.get_user_rank(query.from_user.id)
+            leaderboard_text += f"\n━━━━━━━━━━━━━━━━━━━━\n"
+            leaderboard_text += f"📍 Your Position: #{user_rank}\n"
+            leaderboard_text += f"💰 Your Earnings: ₹{user['total_referrals'] * RUPEES_PER_REFERRAL}"
+        
         referral_link = f"https://t.me/{context.bot.username}?start={user['referral_code']}" if user else ""
 
         keyboard = [[
@@ -505,7 +636,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.message.edit_text(leaderboard_text,
-                                      reply_markup=reply_markup)
+                                      reply_markup=reply_markup,
+                                      parse_mode='HTML')
 
     elif query.data == "redeem":
         user = db.get_user(user_id)
@@ -585,6 +717,8 @@ def main():
     application.add_handler(CommandHandler("removechannel", remove_channel))
     application.add_handler(CommandHandler("channels", list_channels))
     application.add_handler(CommandHandler("setstart", set_start_message))
+    application.add_handler(CommandHandler("setlogchannel", set_log_channel))
+    application.add_handler(CommandHandler("getlogchannel", get_log_channel))
     application.add_handler(CallbackQueryHandler(button_callback))
 
     logger.info("Bot is starting...")
