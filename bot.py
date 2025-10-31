@@ -36,22 +36,23 @@ async def check_channel_membership(update: Update,
         return True
 
     not_joined = []
-    for channel_id, channel_name in channels:
+    for channel_id, channel_name, channel_link in channels:
         try:
             member = await context.bot.get_chat_member(chat_id=channel_id,
                                                        user_id=user_id)
             if member.status in ['left', 'kicked']:
-                not_joined.append((channel_id, channel_name))
+                not_joined.append((channel_id, channel_name, channel_link))
         except TelegramError as e:
             logger.error(f"Error checking membership for {channel_id}: {e}")
             continue
 
     if not_joined:
         keyboard = []
-        for channel_id, channel_name in not_joined:
-            channel_link = f"https://t.me/{channel_id.replace('@', '')}"
+        for channel_id, channel_name, channel_link in not_joined:
+            # Use the stored link, or fallback to constructing one
+            link_to_use = channel_link if channel_link else f"https://t.me/{channel_id.replace('@', '').replace('-100', '')}"
             keyboard.append([
-                InlineKeyboardButton(f"Join {channel_name}", url=channel_link)
+                InlineKeyboardButton(f"Join {channel_name}", url=link_to_use)
             ])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -426,27 +427,93 @@ async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ This command is only for the bot owner!")
         return
 
-    if len(context.args) < 2:
+    if len(context.args) < 1:
         await update.message.reply_text(
-            "Usage: /addchannel <channel_id> <channel_name>")
+            "📝 Usage: /addchannel <channel_link>\n\n"
+            "Examples:\n"
+            "• Public: /addchannel https://t.me/yourchannel\n"
+            "• Public: /addchannel @yourchannel\n"
+            "• Private: /addchannel https://t.me/+AbCdEfGh123")
         return
 
-    channel_id = context.args[0]
-    channel_name = ' '.join(context.args[1:])
-
-    if db.add_channel(channel_id, channel_name):
+    channel_link = context.args[0]
+    
+    # Check if this is a private invite link
+    is_private_link = '/+' in channel_link or '/joinchat/' in channel_link
+    
+    # For private channels, check if channel ID was provided
+    if is_private_link and len(context.args) < 2:
         await update.message.reply_text(
-            f"✅ Channel added: {channel_name} ({channel_id})")
+            "📝 For private channels, please provide the channel ID:\n\n"
+            "Usage: /addchannel <invite_link> <channel_id>\n\n"
+            "Example: /addchannel https://t.me/+AbCdEf -1001234567890\n\n"
+            "To get channel ID:\n"
+            "1. Add bot as admin to your channel\n"
+            "2. Forward any message from channel to @userinfobot\n"
+            "3. Copy the channel ID from the response")
+        return
+    
+    # Extract channel username or ID from link
+    try:
+        if is_private_link and len(context.args) >= 2:
+            # Private channel with both link and ID provided
+            channel_id = context.args[1]
+            chat = await context.bot.get_chat(channel_id)
+            channel_name = chat.title
+            final_link = channel_link  # Use the invite link
+            
+        elif channel_link.startswith('@'):
+            # Public channel with @username
+            chat = await context.bot.get_chat(channel_link)
+            channel_id = str(chat.id)
+            channel_name = chat.title
+            final_link = f"https://t.me/{chat.username}" if chat.username else channel_link
+            
+        elif 't.me/' in channel_link:
+            # Public channel link
+            username = channel_link.split('t.me/')[-1].split('?')[0]
+            if username:
+                chat = await context.bot.get_chat(f'@{username}')
+                channel_id = str(chat.id)
+                channel_name = chat.title
+                final_link = f"https://t.me/{chat.username}" if chat.username else channel_link
+            else:
+                await update.message.reply_text("❌ Invalid channel link!")
+                return
+        else:
+            # Assume it's a channel ID (for manual input)
+            chat = await context.bot.get_chat(channel_link)
+            channel_id = str(chat.id)
+            channel_name = chat.title
+            final_link = f"https://t.me/{chat.username}" if chat.username else None
         
-        await send_log(
-            context,
-            f"➕ <b>Channel Added</b>\n\n"
-            f"👑 Admin: {html.escape(update.effective_user.first_name)}\n"
-            f"📺 Channel: {html.escape(channel_name)}\n"
-            f"🆔 ID: <code>{html.escape(channel_id)}</code>"
-        )
-    else:
-        await update.message.reply_text("❌ Channel already exists!")
+        if db.add_channel(channel_id, channel_name, final_link):
+            channel_type = "Private" if is_private_link else "Public"
+            await update.message.reply_text(
+                f"✅ {channel_type} channel added successfully!\n\n"
+                f"📺 Name: {channel_name}\n"
+                f"🆔 ID: {channel_id}\n"
+                f"🔗 Link: {final_link if final_link else 'N/A'}")
+            
+            await send_log(
+                context,
+                f"➕ <b>{channel_type} Channel Added</b>\n\n"
+                f"👑 Admin: {html.escape(update.effective_user.first_name)}\n"
+                f"📺 Channel: {html.escape(channel_name)}\n"
+                f"🆔 ID: <code>{channel_id}</code>\n"
+                f"🔗 Link: {html.escape(final_link if final_link else 'N/A')}"
+            )
+        else:
+            await update.message.reply_text("❌ Channel already exists!")
+            
+    except TelegramError as e:
+        await update.message.reply_text(
+            f"❌ Error adding channel: {e}\n\n"
+            f"Make sure:\n"
+            f"• The bot is added as admin to the channel\n"
+            f"• The channel link/username is correct\n"
+            f"• For public channels: @username or https://t.me/username\n"
+            f"• For private channels: provide both invite link and channel ID")
 
 
 async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -487,8 +554,9 @@ async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     channels_text = "📋 Mandatory Channels:\n\n"
-    for channel_id, channel_name in channels:
-        channels_text += f"• {channel_name} ({channel_id})\n"
+    for channel_id, channel_name, channel_link in channels:
+        link_display = channel_link if channel_link else channel_id
+        channels_text += f"• {channel_name}\n  🔗 {link_display}\n  🆔 {channel_id}\n\n"
 
     await update.message.reply_text(channels_text)
 
