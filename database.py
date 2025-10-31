@@ -55,9 +55,17 @@ class Database:
             CREATE TABLE IF NOT EXISTS channels (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 channel_id TEXT UNIQUE,
-                channel_name TEXT
+                channel_name TEXT,
+                channel_link TEXT
             )
         ''')
+        
+        # Add channel_link column if it doesn't exist (for existing databases)
+        try:
+            cursor.execute('ALTER TABLE channels ADD COLUMN channel_link TEXT')
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS settings (
@@ -224,12 +232,12 @@ class Database:
             'total_redemptions': total_redemptions
         }
     
-    def add_channel(self, channel_id: str, channel_name: str) -> bool:
+    def add_channel(self, channel_id: str, channel_name: str, channel_link: str = None) -> bool:
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
-            cursor.execute('INSERT INTO channels (channel_id, channel_name) VALUES (?, ?)', 
-                         (channel_id, channel_name))
+            cursor.execute('INSERT INTO channels (channel_id, channel_name, channel_link) VALUES (?, ?, ?)', 
+                         (channel_id, channel_name, channel_link))
             conn.commit()
             conn.close()
             return True
@@ -245,10 +253,10 @@ class Database:
         conn.close()
         return deleted
     
-    def get_channels(self) -> List[Tuple[str, str]]:
+    def get_channels(self) -> List[Tuple[str, str, str]]:
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT channel_id, channel_name FROM channels')
+        cursor.execute('SELECT channel_id, channel_name, channel_link FROM channels')
         channels = cursor.fetchall()
         conn.close()
         return channels
